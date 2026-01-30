@@ -508,5 +508,5 @@ Return as JSON with this format:
 });
 
 app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+    console.log(`🚀 Neighborhood Finder API running on port ${port}`);
 });
