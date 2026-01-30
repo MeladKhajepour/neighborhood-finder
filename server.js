@@ -132,7 +132,56 @@ async function getCityCoordinates(city) {
     }
 }
 
-// Function to get amenity coordinates in a city
+// Function to get ALL amenity coordinates in a city (pagination)
+async function getAllAmenityCoordinates(city, amenityType) {
+    try {
+        const cityCoords = await getCityCoordinates(city);
+        if (!cityCoords) return [];
+
+        const allPlaces = [];
+        let nextPageToken = null;
+
+        // Fetch multiple pages of results (up to 60 results)
+        for (let page = 0; page < 3; page++) {
+            try {
+                const response = await mapsClient.placesNearby({
+                    params: {
+                        location: cityCoords,
+                        radius: 8000, // 8km radius to catch more
+                        type: amenityType,
+                        pagetoken: nextPageToken,
+                        key: process.env.GOOGLE_MAPS_API_KEY,
+                    },
+                });
+
+                if (response.data.results) {
+                    allPlaces.push(...response.data.results);
+                }
+
+                nextPageToken = response.data.next_page_token;
+                if (!nextPageToken) break;
+
+                // Wait before next request (API requirement)
+                await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+                console.error(`Error on page ${page}: ${error.message}`);
+                break;
+            }
+        }
+
+        return allPlaces.map(place => ({
+            name: place.name,
+            lat: place.geometry.location.lat,
+            lng: place.geometry.location.lng,
+            type: amenityType,
+        }));
+    } catch (error) {
+        console.error(`Error getting ${amenityType} coordinates: ${error.message}`);
+        return [];
+    }
+}
+
+// Function to get amenity coordinates in a city (limited, for display)
 async function getAmenityCoordinates(city, amenityType, limit = 5) {
     try {
         const cityCoords = await getCityCoordinates(city);
@@ -141,7 +190,7 @@ async function getAmenityCoordinates(city, amenityType, limit = 5) {
         const response = await mapsClient.placesNearby({
             params: {
                 location: cityCoords,
-                radius: 5000, // 5km radius
+                radius: 8000,
                 type: amenityType,
                 key: process.env.GOOGLE_MAPS_API_KEY,
             },
@@ -158,6 +207,102 @@ async function getAmenityCoordinates(city, amenityType, limit = 5) {
         console.error(`Error getting ${amenityType} coordinates: ${error.message}`);
         return [];
     }
+}
+
+// Function to identify neighborhood from coordinates using reverse geocoding
+async function getNeighborhoodFromCoordinates(lat, lng) {
+    try {
+        const response = await mapsClient.reverseGeocode({
+            params: {
+                latlng: { lat, lng },
+                key: process.env.GOOGLE_MAPS_API_KEY,
+            },
+        });
+
+        if (response.data.results && response.data.results.length > 0) {
+            // Look for neighborhood-level address component
+            const result = response.data.results[0];
+            const addressComponents = result.address_components || [];
+
+            // Try to find a neighborhood or locality
+            let neighborhood = null;
+            for (const component of addressComponents) {
+                if (component.types.includes('neighborhood')) {
+                    return component.long_name;
+                }
+            }
+            for (const component of addressComponents) {
+                if (component.types.includes('locality')) {
+                    return component.long_name;
+                }
+            }
+            // Fallback to first address component
+            return result.formatted_address.split(',')[0];
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error getting neighborhood: ${error.message}`);
+        return null;
+    }
+}
+
+// Function to cluster amenities by neighborhood and score neighborhoods
+async function scoreNeighborhoodsByAmenities(city, amenitiesNeeded) {
+    console.log('\n🏘️  SCORING NEIGHBORHOODS BY AMENITY CLUSTERS...');
+
+    const neighborhoodScores = {};
+    const neighborhoodAmenities = {};
+
+    // For each amenity type, get all instances and group by neighborhood
+    for (const amenityType of amenitiesNeeded) {
+        try {
+            console.log(`  📍 Finding all ${amenityType} in ${city}...`);
+            const amenities = await getAllAmenityCoordinates(city, amenityType);
+            console.log(`  ✅ Found ${amenities.length} ${amenityType} locations`);
+
+            // Map each amenity to a neighborhood
+            for (const amenity of amenities) {
+                const neighborhood = await getNeighborhoodFromCoordinates(amenity.lat, amenity.lng);
+                if (neighborhood) {
+                    if (!neighborhoodScores[neighborhood]) {
+                        neighborhoodScores[neighborhood] = {};
+                        neighborhoodAmenities[neighborhood] = {};
+                    }
+                    if (!neighborhoodScores[neighborhood][amenityType]) {
+                        neighborhoodScores[neighborhood][amenityType] = 0;
+                        neighborhoodAmenities[neighborhood][amenityType] = [];
+                    }
+                    neighborhoodScores[neighborhood][amenityType]++;
+                    neighborhoodAmenities[neighborhood][amenityType].push(amenity);
+                }
+            }
+        } catch (error) {
+            console.error(`⚠️ Error processing ${amenityType}: ${error.message}`);
+        }
+    }
+
+    // Calculate overall scores for neighborhoods
+    const scoredNeighborhoods = Object.entries(neighborhoodScores).map(([neighborhood, amenityCount]) => {
+        // Score based on total amenities and variety
+        const totalAmenities = Object.values(amenityCount).reduce((a, b) => a + b, 0);
+        const amenityTypes = Object.keys(amenityCount).length;
+        const score = totalAmenities + (amenityTypes * 5); // Bonus for variety
+
+        return {
+            neighborhood,
+            amenityScore: score,
+            amenityCounts: amenityCount,
+            totalAmenities: totalAmenities,
+            amenityTypes: amenityTypes,
+        };
+    }).sort((a, b) => b.amenityScore - a.amenityScore);
+
+    console.log(`✅ Identified ${scoredNeighborhoods.length} neighborhoods with amenities`);
+    scoredNeighborhoods.slice(0, 5).forEach((n, i) => {
+        console.log(`  ${i + 1}. ${n.neighborhood}: ${n.totalAmenities} amenities (${n.amenityTypes} types)`);
+    });
+
+    return { scoredNeighborhoods, neighborhoodAmenities };
 }
 
 // Function to verify neighborhood amenities using Google Maps
@@ -422,7 +567,7 @@ Return as JSON with this format:
     }
 });
 
-// Main recommendations endpoint
+// Main recommendations endpoint - AMENITY-FIRST APPROACH
 app.post('/api/recommendations', async (req, res) => {
     try {
         const { city, preferences } = req.body;
@@ -435,122 +580,8 @@ app.post('/api/recommendations', async (req, res) => {
             return res.status(400).json({ error: 'City and preferences are required' });
         }
 
-        // Step 1: Use OpenAI to parse preferences and generate Reddit search queries
-        console.log('🤖 STEP 1: Parsing preferences with OpenAI...');
-        const parsingPrompt = `The user wants to stay in ${city} with these preferences: "${preferences}"
-
-Extract the key preferences and suggest NEIGHBORHOOD-FOCUSED Reddit search queries.
-Focus on finding neighborhood recommendations, living conditions, and area-specific discussions.
-Avoid queries that are too specific about brands or services.
-
-Return as JSON with this format:
-{
-  "preferences": ["preference1", "preference2", ...],
-  "redditQueries": ["search query 1 (neighborhood focused)", "search query 2 (neighborhood focused)", ...]
-}
-
-Example: If preferences are "close to Crunch Fitness, quiet, no homeless"
-- Good queries: "quiet neighborhoods ${city}", "safest neighborhoods ${city}", "best neighborhoods to live ${city}"
-- Bad queries: "Crunch Fitness locations ${city}"`;
-
-        const parsingResponse = await openai.chat.completions.create({
-            model: 'gpt-4',
-            messages: [{ role: 'user', content: parsingPrompt }],
-            temperature: 0.7,
-        });
-
-        let parsingText = parsingResponse.choices[0].message.content;
-        // Remove markdown code blocks if present
-        parsingText = parsingText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-        const parsedData = JSON.parse(parsingText);
-        console.log('✅ OpenAI parsed preferences:');
-        console.log(`   Preferences: ${JSON.stringify(parsedData.preferences)}`);
-        console.log(`   Reddit queries: ${JSON.stringify(parsedData.redditQueries)}\n`);
-
-        // Step 2: Scrape Reddit with the queries (from relevant subreddits)
-        const redditPosts = await scrapeReddit(parsedData.redditQueries, city);
-
-        // Step 2.5: Filter posts for relevance
-        const filteredPosts = redditPosts.length > 0
-            ? await filterRelevantPosts(redditPosts, preferences)
-            : [];
-
-        const redditData = filteredPosts.length > 0
-            ? filteredPosts.join('\n')
-            : `Limited Reddit posts found. Using general knowledge about ${city} neighborhoods.`;
-        console.log('📋 Filtered Reddit data to analyze:')
-        console.log(`${redditData.substring(0, 200)}...\n`);
-
-        // Step 3: Use OpenAI to analyze and recommend neighborhoods
-        console.log('🤖 STEP 3: OpenAI analyzing neighborhoods...');
-        const analysisPrompt = `Based on the following Reddit discussions about ${city} neighborhoods and the user's preferences (${preferences}), recommend the best neighborhoods for them.
-
-Reddit data:
-${redditData}
-
-User preferences extracted: ${JSON.stringify(parsedData.preferences)}
-
-Return as JSON with this format:
-{
-  "recommendations": [
-    {
-      "neighborhood": "Neighborhood Name",
-      "matchScore": 0.9,
-      "matchReasons": ["reason1", "reason2"],
-      "concerns": ["any concerns"]
-    }
-  ],
-  "summary": "Brief summary of findings"
-}`;
-
-        const analysisResponse = await openai.chat.completions.create({
-            model: 'gpt-4',
-            messages: [{ role: 'user', content: analysisPrompt }],
-            temperature: 0.7,
-        });
-
-        let responseText = analysisResponse.choices[0].message.content;
-        // Remove markdown code blocks if present
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        // Find JSON in response (in case OpenAI returns text with JSON embedded)
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            // If no JSON found, create fallback response
-            console.warn('No JSON found in response, using fallback');
-            const recommendations = {
-                recommendations: [
-                    {
-                        neighborhood: "Downtown",
-                        matchScore: 0.7,
-                        matchReasons: parsedData.preferences,
-                        concerns: ["Limited Reddit data available"]
-                    }
-                ],
-                summary: "Unable to find specific Reddit data. Please verify the city name and try again."
-            };
-            return res.json({
-                city,
-                userPreferences: preferences,
-                recommendations,
-            });
-        }
-
-        const recommendations = JSON.parse(jsonMatch[0]);
-
-        console.log('✅ OpenAI recommendations generated:');
-        recommendations.recommendations.forEach((rec, i) => {
-            console.log(`   ${i + 1}. ${rec.neighborhood} (Match: ${(rec.matchScore * 100).toFixed(0)}%)`);
-            console.log(`      Reasons: ${rec.matchReasons.join(', ')}`);
-        });
-
-        // Get city coordinates and amenities
-        console.log('\n📍 GETTING MAP DATA...');
-        const cityCoords = await getCityCoordinates(city);
-        console.log(`City coordinates: ${cityCoords?.lat}, ${cityCoords?.lng}`);
-
-        // Use OpenAI to extract amenity types from preferences
-        console.log('🔍 EXTRACTING AMENITIES FROM PREFERENCES...');
+        // Step 1: Extract amenity types and qualitative preferences
+        console.log('🤖 STEP 1: Parsing preferences...');
         const amenityExtractionPrompt = `From these user preferences: "${preferences}"
 
 Extract the types of amenities/places they care about. Return as JSON array of Google Maps place types.
@@ -567,7 +598,6 @@ Map common terms to Google Maps types:
 - pharmacy -> "pharmacy"
 
 Return ONLY a JSON array like: ["gym", "grocery_or_supermarket", "restaurant"]
-Be smart - if they mention "close to a gym" extract "gym", if they say "good restaurants" extract "restaurant"
 Only include amenities they actually mentioned or clearly implied.`;
 
         const amenityResponse = await openai.chat.completions.create({
@@ -589,22 +619,139 @@ Only include amenities they actually mentioned or clearly implied.`;
 
         console.log(`Extracted amenities: ${amenitiesNeeded.join(', ')}`);
 
+        // Step 2: Score neighborhoods based on amenity clusters
+        const { scoredNeighborhoods, neighborhoodAmenities } = await scoreNeighborhoodsByAmenities(city, amenitiesNeeded);
+
+        if (scoredNeighborhoods.length === 0) {
+            return res.status(400).json({ error: `No neighborhoods found with requested amenities in ${city}` });
+        }
+
+        // Step 3: Get qualitative preferences from Reddit for filtering
+        console.log('\n📡 STEP 2: Getting qualitative preferences from Reddit...');
+        const qualitativePrompt = `The user wants to stay in ${city} with these preferences: "${preferences}"
+
+Generate Reddit search queries focused on QUALITATIVE aspects (quiet, clean, safe, etc).
+Ignore amenity-specific queries - those are handled separately.
+
+Return as JSON array like: ["quiet neighborhoods ${city}", "safest neighborhoods ${city}"]`;
+
+        const qualitativeResponse = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: qualitativePrompt }],
+            temperature: 0.7,
+        });
+
+        let qualText = qualitativeResponse.choices[0].message.content;
+        qualText = qualText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let redditQueries = [];
+        try {
+            redditQueries = JSON.parse(qualText);
+        } catch (e) {
+            redditQueries = [`neighborhoods in ${city}`, `best places to live in ${city}`];
+        }
+
+        // Scrape Reddit for qualitative data
+        const redditPosts = await scrapeReddit(redditQueries, city);
+        const filteredPosts = redditPosts.length > 0
+            ? await filterRelevantPosts(redditPosts, preferences)
+            : [];
+
+        const redditData = filteredPosts.length > 0
+            ? filteredPosts.join('\n')
+            : `Limited Reddit posts found.`;
+
+        // Step 4: Use OpenAI to score qualitative match for top neighborhoods
+        console.log('\n🤖 STEP 3: Scoring neighborhoods by qualitative preferences...');
+        const topNeighborhoods = scoredNeighborhoods.slice(0, 5).map(n => n.neighborhood).join('", "');
+
+        const qualitativeScoringPrompt = `Based on Reddit discussions about ${city} neighborhoods and the user's preferences (${preferences}),
+score these neighborhoods on qualitative match (0-1):
+
+Neighborhoods to score: "${topNeighborhoods}"
+
+Reddit data:
+${redditData}
+
+Return as JSON object: { "neighborhoodName": 0.85, ... }
+Consider factors like: quiet, clean, safe, friendly, walkable, etc.
+Use values between 0 and 1.`;
+
+        const scoringResponse = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: qualitativeScoringPrompt }],
+            temperature: 0.7,
+        });
+
+        let scoringText = scoringResponse.choices[0].message.content;
+        scoringText = scoringText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let qualitativeScores = {};
+        try {
+            qualitativeScores = JSON.parse(scoringText);
+        } catch (e) {
+            console.warn('Could not parse qualitative scores');
+        }
+
+        // Combine amenity and qualitative scores
+        const recommendations = {
+            recommendations: scoredNeighborhoods.slice(0, 5).map(n => {
+                const qualScore = qualitativeScores[n.neighborhood] || 0.5;
+                const amenityScore = Math.min(n.amenityScore / 50, 1); // Normalize to 0-1
+                const finalScore = (amenityScore * 0.6) + (qualScore * 0.4); // 60% amenities, 40% qualitative
+
+                return {
+                    neighborhood: n.neighborhood,
+                    matchScore: finalScore,
+                    matchReasons: [
+                        `${n.totalAmenities} ${amenitiesNeeded.length > 1 ? 'amenities' : 'amenity'} nearby`,
+                        `${Object.keys(n.amenityCounts).length} types of amenities`,
+                        qualScore > 0.6 ? 'Good qualitative match' : 'Moderate qualitative match'
+                    ],
+                    concerns: qualScore < 0.5 ? ['Limited Reddit data on qualitative aspects'] : [],
+                    amenityBreakdown: n.amenityCounts
+                };
+            })
+        };
+
+        console.log('✅ Recommendations generated:');
+        recommendations.recommendations.forEach((rec, i) => {
+            console.log(`   ${i + 1}. ${rec.neighborhood} (Match: ${(rec.matchScore * 100).toFixed(0)}%)`);
+        });
+
+        // Get city coordinates
+        console.log('\n📍 GETTING MAP DATA...');
+        const cityCoords = await getCityCoordinates(city);
+        console.log(`City coordinates: ${cityCoords?.lat}, ${cityCoords?.lng}`);
+
         const mapData = {
             cityCoordinates: cityCoords,
             amenities: {},
+            neighborhoodAmenities: {},
         };
 
-        // Get coordinates for each amenity type
+        // Get full amenity coordinates for map display
         for (const amenityType of amenitiesNeeded) {
             try {
-                const amenityCoords = await getAmenityCoordinates(city, amenityType);
+                const amenityCoords = await getAmenityCoordinates(city, amenityType, 10);
                 mapData.amenities[amenityType] = amenityCoords;
-                console.log(`✅ Found ${amenityCoords.length} ${amenityType} locations`);
+                console.log(`✅ Found ${amenityCoords.length} ${amenityType} locations for display`);
             } catch (error) {
                 console.error(`⚠️ Error getting ${amenityType}: ${error.message}`);
                 mapData.amenities[amenityType] = [];
             }
         }
+
+        // Add neighborhood-specific amenities
+        recommendations.recommendations.forEach(rec => {
+            mapData.neighborhoodAmenities[rec.neighborhood] = {};
+            for (const amenityType of amenitiesNeeded) {
+                if (neighborhoodAmenities[rec.neighborhood] && neighborhoodAmenities[rec.neighborhood][amenityType]) {
+                    mapData.neighborhoodAmenities[rec.neighborhood][amenityType] =
+                        neighborhoodAmenities[rec.neighborhood][amenityType].slice(0, 5);
+                } else {
+                    mapData.neighborhoodAmenities[rec.neighborhood][amenityType] = [];
+                }
+            }
+        });
 
         console.log(`\n📤 Sending response to client...\n`);
 
