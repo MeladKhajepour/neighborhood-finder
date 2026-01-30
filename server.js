@@ -549,11 +549,45 @@ Return as JSON with this format:
         const cityCoords = await getCityCoordinates(city);
         console.log(`City coordinates: ${cityCoords?.lat}, ${cityCoords?.lng}`);
 
-        // Extract amenity types from preferences
-        const amenitiesNeeded = [];
-        if (preferences.toLowerCase().includes('gym') || preferences.toLowerCase().includes('fitness')) amenitiesNeeded.push('gym');
-        if (preferences.toLowerCase().includes('grocery') || preferences.toLowerCase().includes('supermarket')) amenitiesNeeded.push('grocery_or_supermarket');
-        if (preferences.toLowerCase().includes('transit') || preferences.toLowerCase().includes('bus') || preferences.toLowerCase().includes('metro')) amenitiesNeeded.push('transit_station');
+        // Use OpenAI to extract amenity types from preferences
+        console.log('🔍 EXTRACTING AMENITIES FROM PREFERENCES...');
+        const amenityExtractionPrompt = `From these user preferences: "${preferences}"
+
+Extract the types of amenities/places they care about. Return as JSON array of Google Maps place types.
+Map common terms to Google Maps types:
+- gym/fitness/crunch/peloton -> "gym"
+- grocery/supermarket/whole foods/trader joe -> "grocery_or_supermarket"
+- transit/metro/muni/bart/bus -> "transit_station"
+- restaurant/food/cafe/coffee -> "restaurant"
+- park/outdoor/nature -> "park"
+- hospital/doctor/medical -> "hospital"
+- library -> "library"
+- school -> "school"
+- shopping/mall -> "shopping_mall"
+- pharmacy -> "pharmacy"
+
+Return ONLY a JSON array like: ["gym", "grocery_or_supermarket", "restaurant"]
+Be smart - if they mention "close to a gym" extract "gym", if they say "good restaurants" extract "restaurant"
+Only include amenities they actually mentioned or clearly implied.`;
+
+        const amenityResponse = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: amenityExtractionPrompt }],
+            temperature: 0.5,
+        });
+
+        let amenityText = amenityResponse.choices[0].message.content;
+        amenityText = amenityText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+        let amenitiesNeeded = [];
+        try {
+            amenitiesNeeded = JSON.parse(amenityText);
+        } catch (e) {
+            console.warn('Could not parse amenities, using defaults');
+            amenitiesNeeded = ['gym', 'grocery_or_supermarket'];
+        }
+
+        console.log(`Extracted amenities: ${amenitiesNeeded.join(', ')}`);
 
         const mapData = {
             cityCoordinates: cityCoords,
@@ -562,9 +596,14 @@ Return as JSON with this format:
 
         // Get coordinates for each amenity type
         for (const amenityType of amenitiesNeeded) {
-            const amenityCoords = await getAmenityCoordinates(city, amenityType);
-            mapData.amenities[amenityType] = amenityCoords;
-            console.log(`Found ${amenityCoords.length} ${amenityType} locations`);
+            try {
+                const amenityCoords = await getAmenityCoordinates(city, amenityType);
+                mapData.amenities[amenityType] = amenityCoords;
+                console.log(`✅ Found ${amenityCoords.length} ${amenityType} locations`);
+            } catch (error) {
+                console.error(`⚠️ Error getting ${amenityType}: ${error.message}`);
+                mapData.amenities[amenityType] = [];
+            }
         }
 
         console.log(`\n📤 Sending response to client...\n`);
