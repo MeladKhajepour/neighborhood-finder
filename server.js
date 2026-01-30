@@ -21,9 +21,6 @@ const openai = new OpenAI({
 // Initialize Google Maps client
 const mapsClient = new Client({});
 
-// Mapbox API Key
-const MAPBOX_API_KEY = process.env.MAPBOX_API_KEY;
-
 // Function to dynamically discover relevant subreddits for a city
 async function discoverSubreddits(city) {
     console.log(`\n🔎 DISCOVERING SUBREDDITS FOR: ${city}`);
@@ -131,38 +128,6 @@ async function getCityCoordinates(city) {
         return null;
     } catch (error) {
         console.error(`Error getting city coordinates: ${error.message}`);
-        return null;
-    }
-}
-
-// Function to get neighborhood boundaries using Nominatim (OpenStreetMap)
-async function getNeighborhoodBoundaries(neighborhood, city) {
-    try {
-        // Use Nominatim API to get polygon boundaries for the neighborhood
-        const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(neighborhood + ', ' + city)}&format=geojson&polygon_geojson=1&limit=1`;
-
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'NeighborhoodFinder'
-            },
-            timeout: 10000
-        });
-
-        if (response.data && response.data.features && response.data.features.length > 0) {
-            const feature = response.data.features[0];
-            return {
-                neighborhood: neighborhood,
-                type: feature.geometry.type,
-                coordinates: feature.geometry.coordinates,
-                center: feature.bbox ? {
-                    lat: (feature.bbox[1] + feature.bbox[3]) / 2,
-                    lng: (feature.bbox[0] + feature.bbox[2]) / 2
-                } : null
-            };
-        }
-        return null;
-    } catch (error) {
-        console.error(`Error getting boundaries for ${neighborhood}: ${error.message}`);
         return null;
     }
 }
@@ -627,24 +592,7 @@ Only include amenities they actually mentioned or clearly implied.`;
         const mapData = {
             cityCoordinates: cityCoords,
             amenities: {},
-            neighborhoods: [],
         };
-
-        // Get boundaries for each recommended neighborhood
-        console.log('🗺️  FETCHING NEIGHBORHOOD BOUNDARIES...');
-        for (const rec of recommendations.recommendations) {
-            try {
-                const boundaries = await getNeighborhoodBoundaries(rec.neighborhood, city);
-                if (boundaries) {
-                    mapData.neighborhoods.push(boundaries);
-                    console.log(`✅ Got boundaries for ${rec.neighborhood}`);
-                } else {
-                    console.log(`⚠️ Could not get boundaries for ${rec.neighborhood}`);
-                }
-            } catch (error) {
-                console.error(`⚠️ Error getting boundaries for ${rec.neighborhood}: ${error.message}`);
-            }
-        }
 
         // Get coordinates for each amenity type
         for (const amenityType of amenitiesNeeded) {
