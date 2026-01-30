@@ -111,6 +111,55 @@ Examples: "close to gyms" -> ["gyms", "fitness", "exercise"]
     }
 }
 
+// Function to get city coordinates using Google Maps Geocoding
+async function getCityCoordinates(city) {
+    try {
+        const response = await mapsClient.geocode({
+            params: {
+                address: city,
+                key: process.env.GOOGLE_MAPS_API_KEY,
+            },
+        });
+
+        if (response.data.results && response.data.results.length > 0) {
+            const location = response.data.results[0].geometry.location;
+            return { lat: location.lat, lng: location.lng };
+        }
+        return null;
+    } catch (error) {
+        console.error(`Error getting city coordinates: ${error.message}`);
+        return null;
+    }
+}
+
+// Function to get amenity coordinates in a city
+async function getAmenityCoordinates(city, amenityType, limit = 5) {
+    try {
+        const cityCoords = await getCityCoordinates(city);
+        if (!cityCoords) return [];
+
+        const response = await mapsClient.placesNearby({
+            params: {
+                location: cityCoords,
+                radius: 5000, // 5km radius
+                type: amenityType,
+                key: process.env.GOOGLE_MAPS_API_KEY,
+            },
+        });
+
+        const places = response.data.results || [];
+        return places.slice(0, limit).map(place => ({
+            name: place.name,
+            lat: place.geometry.location.lat,
+            lng: place.geometry.location.lng,
+            type: amenityType,
+        }));
+    } catch (error) {
+        console.error(`Error getting ${amenityType} coordinates: ${error.message}`);
+        return [];
+    }
+}
+
 // Function to verify neighborhood amenities using Google Maps
 async function verifyNeighborhoodAmenities(neighborhood, city, preferences) {
     console.log(`\n🗺️  VERIFYING AMENITIES FOR: ${neighborhood}, ${city}`);
@@ -494,12 +543,37 @@ Return as JSON with this format:
             console.log(`   ${i + 1}. ${rec.neighborhood} (Match: ${(rec.matchScore * 100).toFixed(0)}%)`);
             console.log(`      Reasons: ${rec.matchReasons.join(', ')}`);
         });
+
+        // Get city coordinates and amenities
+        console.log('\n📍 GETTING MAP DATA...');
+        const cityCoords = await getCityCoordinates(city);
+        console.log(`City coordinates: ${cityCoords?.lat}, ${cityCoords?.lng}`);
+
+        // Extract amenity types from preferences
+        const amenitiesNeeded = [];
+        if (preferences.toLowerCase().includes('gym') || preferences.toLowerCase().includes('fitness')) amenitiesNeeded.push('gym');
+        if (preferences.toLowerCase().includes('grocery') || preferences.toLowerCase().includes('supermarket')) amenitiesNeeded.push('grocery_or_supermarket');
+        if (preferences.toLowerCase().includes('transit') || preferences.toLowerCase().includes('bus') || preferences.toLowerCase().includes('metro')) amenitiesNeeded.push('transit_station');
+
+        const mapData = {
+            cityCoordinates: cityCoords,
+            amenities: {},
+        };
+
+        // Get coordinates for each amenity type
+        for (const amenityType of amenitiesNeeded) {
+            const amenityCoords = await getAmenityCoordinates(city, amenityType);
+            mapData.amenities[amenityType] = amenityCoords;
+            console.log(`Found ${amenityCoords.length} ${amenityType} locations`);
+        }
+
         console.log(`\n📤 Sending response to client...\n`);
 
         res.json({
             city,
             userPreferences: preferences,
             recommendations,
+            mapData,
         });
     } catch (error) {
         console.error('❌ ERROR:', error.message);
