@@ -133,7 +133,7 @@ async function getCityCoordinates(city) {
 }
 
 // Function to get ALL amenity coordinates in a city (pagination)
-async function getAllAmenityCoordinates(city, amenityType) {
+async function getAllAmenityCoordinates(city, amenityType, specificNames = []) {
     try {
         const cityCoords = await getCityCoordinates(city);
         if (!cityCoords) return [];
@@ -141,31 +141,60 @@ async function getAllAmenityCoordinates(city, amenityType) {
         const allPlaces = [];
         let nextPageToken = null;
 
-        // Fetch multiple pages of results (up to 60 results)
-        for (let page = 0; page < 3; page++) {
-            try {
-                const response = await mapsClient.placesNearby({
-                    params: {
-                        location: cityCoords,
-                        radius: 8000, // 8km radius to catch more
-                        type: amenityType,
-                        pagetoken: nextPageToken,
-                        key: process.env.GOOGLE_MAPS_API_KEY,
-                    },
-                });
+        // If specific brand names are provided, search for those specifically
+        if (specificNames.length > 0) {
+            for (const brandName of specificNames) {
+                try {
+                    console.log(`    Searching for: ${brandName}`);
+                    const response = await mapsClient.placesNearby({
+                        params: {
+                            location: cityCoords,
+                            radius: 8000,
+                            keyword: brandName,
+                            type: amenityType,
+                            key: process.env.GOOGLE_MAPS_API_KEY,
+                        },
+                    });
 
-                if (response.data.results) {
-                    allPlaces.push(...response.data.results);
+                    if (response.data.results) {
+                        // Filter to only results that match the brand name (fuzzy match)
+                        const filtered = response.data.results.filter(place =>
+                            place.name.toLowerCase().includes(brandName.toLowerCase())
+                        );
+                        allPlaces.push(...filtered);
+                    }
+
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (error) {
+                    console.error(`Error searching for ${brandName}: ${error.message}`);
                 }
+            }
+        } else {
+            // Generic search by type only if no specific brand
+            for (let page = 0; page < 3; page++) {
+                try {
+                    const response = await mapsClient.placesNearby({
+                        params: {
+                            location: cityCoords,
+                            radius: 8000,
+                            type: amenityType,
+                            pagetoken: nextPageToken,
+                            key: process.env.GOOGLE_MAPS_API_KEY,
+                        },
+                    });
 
-                nextPageToken = response.data.next_page_token;
-                if (!nextPageToken) break;
+                    if (response.data.results) {
+                        allPlaces.push(...response.data.results);
+                    }
 
-                // Wait before next request (API requirement)
-                await new Promise(resolve => setTimeout(resolve, 200));
-            } catch (error) {
-                console.error(`Error on page ${page}: ${error.message}`);
-                break;
+                    nextPageToken = response.data.next_page_token;
+                    if (!nextPageToken) break;
+
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (error) {
+                    console.error(`Error on page ${page}: ${error.message}`);
+                    break;
+                }
             }
         }
 
@@ -247,7 +276,7 @@ async function getNeighborhoodFromCoordinates(lat, lng) {
 }
 
 // Function to cluster amenities by neighborhood and score neighborhoods
-async function scoreNeighborhoodsByAmenities(city, amenitiesNeeded) {
+async function scoreNeighborhoodsByAmenities(city, amenitiesNeeded, specificBrands = {}) {
     console.log('\n🏘️  SCORING NEIGHBORHOODS BY AMENITY CLUSTERS...');
 
     const neighborhoodScores = {};
@@ -256,8 +285,9 @@ async function scoreNeighborhoodsByAmenities(city, amenitiesNeeded) {
     // For each amenity type, get all instances and group by neighborhood
     for (const amenityType of amenitiesNeeded) {
         try {
-            console.log(`  📍 Finding all ${amenityType} in ${city}...`);
-            const amenities = await getAllAmenityCoordinates(city, amenityType);
+            const brandNames = specificBrands[amenityType] || [];
+            console.log(`  📍 Finding all ${amenityType} in ${city}${brandNames.length > 0 ? ` (${brandNames.join(', ')})` : ''}...`);
+            const amenities = await getAllAmenityCoordinates(city, amenityType, brandNames);
             console.log(`  ✅ Found ${amenities.length} ${amenityType} locations`);
 
             // Map each amenity to a neighborhood
@@ -580,13 +610,30 @@ app.post('/api/recommendations', async (req, res) => {
             return res.status(400).json({ error: 'City and preferences are required' });
         }
 
-        // Step 1: Extract amenity types and qualitative preferences
+        // Step 1: Extract amenity types and specific brands/names
         console.log('🤖 STEP 1: Parsing preferences...');
         const amenityExtractionPrompt = `From these user preferences: "${preferences}"
 
-Extract the types of amenities/places they care about. Return as JSON array of Google Maps place types.
-Map common terms to Google Maps types:
-- gym/fitness/crunch/peloton -> "gym"
+Extract both:
+1. The TYPES of amenities (gym, grocery, etc.)
+2. The SPECIFIC BRANDS/NAMES if mentioned (e.g., "Crunch Fitness", "Whole Foods", "BART")
+
+Return as JSON:
+{
+  "amenities": [
+    {
+      "type": "gym",
+      "specificNames": ["Crunch Fitness", "Planet Fitness"]
+    },
+    {
+      "type": "grocery_or_supermarket",
+      "specificNames": ["Whole Foods"]
+    }
+  ]
+}
+
+Type mappings:
+- gym/fitness/crunch/peloton/la fitness -> "gym"
 - grocery/supermarket/whole foods/trader joe -> "grocery_or_supermarket"
 - transit/metro/muni/bart/bus -> "transit_station"
 - restaurant/food/cafe/coffee -> "restaurant"
@@ -597,8 +644,8 @@ Map common terms to Google Maps types:
 - shopping/mall -> "shopping_mall"
 - pharmacy -> "pharmacy"
 
-Return ONLY a JSON array like: ["gym", "grocery_or_supermarket", "restaurant"]
-Only include amenities they actually mentioned or clearly implied.`;
+Only include amenities they actually mentioned or implied.
+If no specific names mentioned, use empty array for specificNames.`;
 
         const amenityResponse = await openai.chat.completions.create({
             model: 'gpt-4',
@@ -610,21 +657,29 @@ Only include amenities they actually mentioned or clearly implied.`;
         amenityText = amenityText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 
         let amenitiesNeeded = [];
+        let specificBrands = {};
         try {
-            amenitiesNeeded = JSON.parse(amenityText);
+            const parsed = JSON.parse(amenityText);
+            amenitiesNeeded = parsed.amenities.map(a => a.type);
+            parsed.amenities.forEach(a => {
+                specificBrands[a.type] = a.specificNames || [];
+            });
         } catch (e) {
             console.warn('Could not parse amenities, using defaults');
             amenitiesNeeded = ['gym', 'grocery_or_supermarket'];
         }
 
         console.log(`Extracted amenities: ${amenitiesNeeded.join(', ') || 'None (qualitative search)'}`);
+        if (Object.keys(specificBrands).length > 0) {
+            console.log(`Specific brands: ${JSON.stringify(specificBrands)}`);
+        }
 
         // Step 2: Score neighborhoods based on amenity clusters (if amenities specified)
         let scoredNeighborhoods = [];
         let neighborhoodAmenities = {};
 
         if (amenitiesNeeded.length > 0) {
-            const result = await scoreNeighborhoodsByAmenities(city, amenitiesNeeded);
+            const result = await scoreNeighborhoodsByAmenities(city, amenitiesNeeded, specificBrands);
             scoredNeighborhoods = result.scoredNeighborhoods;
             neighborhoodAmenities = result.neighborhoodAmenities;
 
