@@ -691,6 +691,37 @@ Use values between 0 and 1.`;
             console.warn('Could not parse qualitative scores');
         }
 
+        // Ask OpenAI to identify specific concerns for top neighborhoods
+        console.log('\n⚠️ STEP 4: Identifying concerns for neighborhoods...');
+        const neighborhoodsForConcerns = scoredNeighborhoods.slice(0, 5).map(n => n.neighborhood).join('", "');
+
+        const concernsPrompt = `Based on Reddit discussions about ${city} neighborhoods and the user's preferences (${preferences}),
+identify specific concerns or potential downsides for these neighborhoods: "${neighborhoodsForConcerns}"
+
+Reddit data:
+${redditData}
+
+For each neighborhood, list 1-2 legitimate concerns (e.g., high rent, parking issues, long commute, noise, safety concerns, lack of public transit, etc.)
+
+Return as JSON object: { "neighborhoodName": ["concern1", "concern2"], ... }
+Only include concerns mentioned in Reddit or that are realistic for the area.
+Return empty array if no concerns found.`;
+
+        const concernsResponse = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: concernsPrompt }],
+            temperature: 0.7,
+        });
+
+        let concernsText = concernsResponse.choices[0].message.content;
+        concernsText = concernsText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        let concernsMap = {};
+        try {
+            concernsMap = JSON.parse(concernsText);
+        } catch (e) {
+            console.warn('Could not parse concerns');
+        }
+
         // Combine amenity and qualitative scores
         const recommendations = {
             recommendations: scoredNeighborhoods.slice(0, 5).map(n => {
@@ -706,7 +737,7 @@ Use values between 0 and 1.`;
                         `${Object.keys(n.amenityCounts).length} types of amenities`,
                         qualScore > 0.6 ? 'Good qualitative match' : 'Moderate qualitative match'
                     ],
-                    concerns: qualScore < 0.5 ? ['Limited Reddit data on qualitative aspects'] : [],
+                    concerns: concernsMap[n.neighborhood] || [],
                     amenityBreakdown: n.amenityCounts
                 };
             })
