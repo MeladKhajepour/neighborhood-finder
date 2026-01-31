@@ -161,12 +161,16 @@ async function getAllAmenityCoordinates(city, amenityType, specificNames = []) {
                         const brandLower = brandName.toLowerCase();
                         const filtered = response.data.results.filter(place => {
                             const placeName = place.name.toLowerCase();
-                            // Check if brand name appears in the place name
-                            // Split by spaces to match any part of the brand
-                            const brandParts = brandLower.split(/\s+/).filter(p => p.length > 2); // Only significant words
-                            return brandParts.some(part => placeName.includes(part)) &&
-                                   !placeName.includes('google') && // Exclude Google's own locations
-                                   !placeName.includes('test'); // Exclude test locations
+                            // Require the FIRST word of brand name to be in the place name
+                            // This ensures "Crunch Fitness" matches "Crunch Fitness San Francisco" but NOT "24 Hour Fitness"
+                            const brandWords = brandLower.split(/\s+/).filter(p => p.length > 2);
+                            if (brandWords.length === 0) return false;
+                            const firstWord = brandWords[0];
+                            return placeName.includes(firstWord) &&
+                                   (placeName.indexOf(firstWord) === 0 ||
+                                    placeName.substring(0, 20).includes(firstWord)) &&
+                                   !placeName.includes('google') &&
+                                   !placeName.includes('test');
                         });
                         console.log(`    Found ${response.data.results.length} total results, filtered to ${filtered.length} matching ${brandName}`);
                         allPlaces.push(...filtered);
@@ -244,8 +248,15 @@ async function getAmenityCoordinates(city, amenityType, limit = 5, specificNames
                         const brandLower = brandName.toLowerCase();
                         const filtered = response.data.results.filter(place => {
                             const placeName = place.name.toLowerCase();
-                            const brandParts = brandLower.split(/\s+/).filter(p => p.length > 2);
-                            return brandParts.some(part => placeName.includes(part));
+                            // Require the FIRST word of brand name to be in the place name
+                            // This ensures "Crunch Fitness" matches "Crunch Fitness San Francisco" but NOT "24 Hour Fitness"
+                            const brandWords = brandLower.split(/\s+/).filter(p => p.length > 2);
+                            if (brandWords.length === 0) return false;
+                            // Primary brand word must be at start or right after city name
+                            const firstWord = brandWords[0];
+                            return placeName.includes(firstWord) &&
+                                   (placeName.indexOf(firstWord) === 0 ||
+                                    placeName.substring(0, 20).includes(firstWord)); // Check first 20 chars
                         });
                         places.push(...filtered);
                     }
