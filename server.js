@@ -219,21 +219,54 @@ async function getAllAmenityCoordinates(city, amenityType, specificNames = []) {
 }
 
 // Function to get amenity coordinates in a city (limited, for display)
-async function getAmenityCoordinates(city, amenityType, limit = 5) {
+async function getAmenityCoordinates(city, amenityType, limit = 5, specificNames = []) {
     try {
         const cityCoords = await getCityCoordinates(city);
         if (!cityCoords) return [];
 
-        const response = await mapsClient.placesNearby({
-            params: {
-                location: cityCoords,
-                radius: 8000,
-                type: amenityType,
-                key: process.env.GOOGLE_MAPS_API_KEY,
-            },
-        });
+        let places = [];
 
-        const places = response.data.results || [];
+        // If specific brand names provided, search for those
+        if (specificNames.length > 0) {
+            for (const brandName of specificNames) {
+                try {
+                    const response = await mapsClient.placesNearby({
+                        params: {
+                            location: cityCoords,
+                            radius: 8000,
+                            keyword: brandName,
+                            type: amenityType,
+                            key: process.env.GOOGLE_MAPS_API_KEY,
+                        },
+                    });
+
+                    if (response.data.results) {
+                        const brandLower = brandName.toLowerCase();
+                        const filtered = response.data.results.filter(place => {
+                            const placeName = place.name.toLowerCase();
+                            const brandParts = brandLower.split(/\s+/).filter(p => p.length > 2);
+                            return brandParts.some(part => placeName.includes(part));
+                        });
+                        places.push(...filtered);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (error) {
+                    console.error(`Error searching for ${brandName}: ${error.message}`);
+                }
+            }
+        } else {
+            // Generic search if no specific brands
+            const response = await mapsClient.placesNearby({
+                params: {
+                    location: cityCoords,
+                    radius: 8000,
+                    type: amenityType,
+                    key: process.env.GOOGLE_MAPS_API_KEY,
+                },
+            });
+            places = response.data.results || [];
+        }
+
         return places.slice(0, limit).map(place => ({
             name: place.name,
             lat: place.geometry.location.lat,
@@ -890,12 +923,13 @@ Return empty array if no concerns found.`;
             neighborhoodAmenities: {},
         };
 
-        // Get full amenity coordinates for map display
+        // Get full amenity coordinates for map display (with brand filtering if specified)
         for (const amenityType of amenitiesNeeded) {
             try {
-                const amenityCoords = await getAmenityCoordinates(city, amenityType, 10);
+                const brandNames = specificBrands[amenityType] || [];
+                const amenityCoords = await getAmenityCoordinates(city, amenityType, 10, brandNames);
                 mapData.amenities[amenityType] = amenityCoords;
-                console.log(`✅ Found ${amenityCoords.length} ${amenityType} locations for display`);
+                console.log(`✅ Found ${amenityCoords.length} ${amenityType} locations for display${brandNames.length > 0 ? ` (filtered)` : ''}`);
             } catch (error) {
                 console.error(`⚠️ Error getting ${amenityType}: ${error.message}`);
                 mapData.amenities[amenityType] = [];
