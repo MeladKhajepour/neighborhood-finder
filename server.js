@@ -617,13 +617,53 @@ Only include amenities they actually mentioned or clearly implied.`;
             amenitiesNeeded = ['gym', 'grocery_or_supermarket'];
         }
 
-        console.log(`Extracted amenities: ${amenitiesNeeded.join(', ')}`);
+        console.log(`Extracted amenities: ${amenitiesNeeded.join(', ') || 'None (qualitative search)'}`);
 
-        // Step 2: Score neighborhoods based on amenity clusters
-        const { scoredNeighborhoods, neighborhoodAmenities } = await scoreNeighborhoodsByAmenities(city, amenitiesNeeded);
+        // Step 2: Score neighborhoods based on amenity clusters (if amenities specified)
+        let scoredNeighborhoods = [];
+        let neighborhoodAmenities = {};
 
-        if (scoredNeighborhoods.length === 0) {
-            return res.status(400).json({ error: `No neighborhoods found with requested amenities in ${city}` });
+        if (amenitiesNeeded.length > 0) {
+            const result = await scoreNeighborhoodsByAmenities(city, amenitiesNeeded);
+            scoredNeighborhoods = result.scoredNeighborhoods;
+            neighborhoodAmenities = result.neighborhoodAmenities;
+
+            if (scoredNeighborhoods.length === 0) {
+                return res.status(400).json({ error: `No neighborhoods found with requested amenities in ${city}` });
+            }
+        } else {
+            // No amenities specified - use Reddit data to identify neighborhoods
+            console.log('🏘️  NO AMENITIES SPECIFIED - USING REDDIT DATA TO FIND NEIGHBORHOODS...');
+
+            // Extract neighborhood names mentioned in Reddit posts
+            const neighborhoodExtractionPrompt = `From these Reddit posts about ${city}, extract the names of neighborhoods/areas mentioned:
+
+${redditData}
+
+Return as JSON array of neighborhood names: ["neighborhood1", "neighborhood2", ...]
+Only include specific neighborhood names, not generic terms.`;
+
+            const neighborhoodExtractionResponse = await openai.chat.completions.create({
+                model: 'gpt-4',
+                messages: [{ role: 'user', content: neighborhoodExtractionPrompt }],
+                temperature: 0.5,
+            });
+
+            let neighborhoodText = neighborhoodExtractionResponse.choices[0].message.content;
+            neighborhoodText = neighborhoodText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+            try {
+                const mentionedNeighborhoods = JSON.parse(neighborhoodText);
+                scoredNeighborhoods = mentionedNeighborhoods.map(n => ({
+                    neighborhood: n,
+                    totalAmenities: 0,
+                    amenityCounts: {},
+                    amenityScore: 0
+                }));
+            } catch (e) {
+                console.warn('Could not extract neighborhoods from Reddit');
+                scoredNeighborhoods = [{ neighborhood: 'Downtown', totalAmenities: 0, amenityCounts: {}, amenityScore: 0 }];
+            }
         }
 
         // Step 3: Get qualitative preferences from Reddit for filtering
@@ -748,21 +788,23 @@ Return empty array if no concerns found.`;
             }
         });
 
-        // Combine amenity and qualitative scores
+        // Return ranked recommendations (order itself indicates quality)
         const recommendations = {
             recommendations: scoredNeighborhoods.slice(0, 5).map(n => {
-                const qualScore = qualitativeScores[n.neighborhood] || 0.5;
-                const amenityScore = Math.min(n.amenityScore / 50, 1); // Normalize to 0-1
-                const finalScore = (amenityScore * 0.6) + (qualScore * 0.4); // 60% amenities, 40% qualitative
+                const reasons = [];
+                if (n.totalAmenities > 0) {
+                    reasons.push(`${n.totalAmenities} ${amenitiesNeeded.length > 1 ? 'amenities' : 'amenity'} nearby`);
+                }
+                if (Object.keys(n.amenityCounts).length > 0) {
+                    reasons.push(`${Object.keys(n.amenityCounts).length} types of amenities`);
+                }
+                if (redditPosts.length > 0) {
+                    reasons.push('Well-reviewed on community forums');
+                }
 
                 return {
                     neighborhood: n.neighborhood,
-                    matchScore: finalScore,
-                    matchReasons: [
-                        `${n.totalAmenities} ${amenitiesNeeded.length > 1 ? 'amenities' : 'amenity'} nearby`,
-                        `${Object.keys(n.amenityCounts).length} types of amenities`,
-                        qualScore > 0.6 ? 'Good qualitative match' : 'Moderate qualitative match'
-                    ],
+                    matchReasons: reasons.length > 0 ? reasons : ['Strong neighborhood match'],
                     concerns: concernsMap[n.neighborhood] || [],
                     amenityBreakdown: n.amenityCounts
                 };
