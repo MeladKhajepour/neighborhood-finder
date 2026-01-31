@@ -718,9 +718,35 @@ Return empty array if no concerns found.`;
         let concernsMap = {};
         try {
             concernsMap = JSON.parse(concernsText);
+            console.log(`✅ Extracted concerns: ${JSON.stringify(concernsMap)}`);
         } catch (e) {
-            console.warn('Could not parse concerns');
+            console.warn('Could not parse concerns:', e.message);
         }
+
+        // Generate fallback concerns if not found or empty
+        scoredNeighborhoods.slice(0, 5).forEach(n => {
+            if (!concernsMap[n.neighborhood] || concernsMap[n.neighborhood].length === 0) {
+                const concerns = [];
+
+                // Generate contextual concerns based on neighborhood data
+                if (n.totalAmenities < 5) {
+                    concerns.push('Limited number of requested amenities nearby');
+                }
+                if (n.amenityTypes < amenitiesNeeded.length) {
+                    concerns.push('Not all requested amenity types available in this neighborhood');
+                }
+                if (redditPosts.length === 0) {
+                    concerns.push('Limited community feedback available');
+                }
+
+                // If no concerns generated, add a neutral one
+                if (concerns.length === 0) {
+                    concerns.push('Research more on community forums and local resources');
+                }
+
+                concernsMap[n.neighborhood] = concerns;
+            }
+        });
 
         // Combine amenity and qualitative scores
         const recommendations = {
