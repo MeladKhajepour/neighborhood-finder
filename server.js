@@ -157,10 +157,18 @@ async function getAllAmenityCoordinates(city, amenityType, specificNames = []) {
                     });
 
                     if (response.data.results) {
-                        // Filter to only results that match the brand name (fuzzy match)
-                        const filtered = response.data.results.filter(place =>
-                            place.name.toLowerCase().includes(brandName.toLowerCase())
-                        );
+                        // Strict filtering - only include results that match the brand name
+                        const brandLower = brandName.toLowerCase();
+                        const filtered = response.data.results.filter(place => {
+                            const placeName = place.name.toLowerCase();
+                            // Check if brand name appears in the place name
+                            // Split by spaces to match any part of the brand
+                            const brandParts = brandLower.split(/\s+/).filter(p => p.length > 2); // Only significant words
+                            return brandParts.some(part => placeName.includes(part)) &&
+                                   !placeName.includes('google') && // Exclude Google's own locations
+                                   !placeName.includes('test'); // Exclude test locations
+                        });
+                        console.log(`    Found ${response.data.results.length} total results, filtered to ${filtered.length} matching ${brandName}`);
                         allPlaces.push(...filtered);
                     }
 
